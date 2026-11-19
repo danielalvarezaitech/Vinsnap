@@ -45,6 +45,10 @@
   #hint{position:absolute;left:0;right:0;top:calc(56% + 16px);text-align:center;font-weight:700;text-shadow:0 1px 4px #000;padding:0 20px}
   #hint small{display:block;font-weight:500;color:#d8dde6;margin-top:4px}
   .bottombar{position:absolute;left:0;right:0;bottom:0;padding:14px 14px calc(var(--sb) + 18px);display:flex;gap:10px;justify-content:center;background:linear-gradient(transparent,rgba(0,0,0,.7))}
+  #video{transform-origin:50% 47%;transition:transform .2s}
+  #zoom{position:absolute;left:0;right:0;bottom:calc(var(--sb) + 86px);display:flex;gap:10px;justify-content:center}
+  .zb{width:46px;height:46px;border-radius:50%;border:0;background:rgba(0,0,0,.55);color:#fff;font-weight:800;font-size:14px;cursor:pointer}
+  .zb.on{background:#fff;color:#000}
   #modes{display:flex;gap:6px;justify-content:center;position:absolute;left:0;right:0;top:calc(38% - 46px)}
   .mode{background:rgba(0,0,0,.55);color:#cfd5df;border:1px solid rgba(255,255,255,.2);border-radius:999px;padding:6px 12px;font-size:13px;font-weight:700}
   .mode.on{background:#fff;color:#000}
@@ -115,6 +119,7 @@
     <button class="icon-btn hidden" id="torchBtn" type="button">💡 Light</button>
   </div>
   <div id="hint">Fit the VIN inside the box<small id="sub">Barcode on the door jamb, or the VIN plate through the windshield</small></div>
+  <div id="zoom"><button class="zb on" data-z="1" type="button">1×</button><button class="zb" data-z="2" type="button">2×</button><button class="zb" data-z="3" type="button">3×</button></div>
   <div class="bottombar">
     <button class="icon-btn" id="photoBtn" type="button">📷 Use photo</button>
     <button class="icon-btn" id="typeBtn" type="button">⌨️ Type VIN</button>
@@ -279,6 +284,7 @@ function unlockAudio(){ try{ audioCtx = audioCtx || new (window.AudioContext||wi
 
 function loadScript(src){ return new Promise(res=>{ const s=document.createElement('script'); s.src=src; s.onload=()=>res(true); s.onerror=()=>res(false); document.head.appendChild(s); }); }
 let initP=null; const ensureDecoders=()=>initP||(initP=initDecoders());
+let ocrWorkers=0, ocrInFlight=0;
 async function initDecoders(){
   if('BarcodeDetector' in window){
     try{ const f=await BarcodeDetector.getSupportedFormats(); const want=['code_39','code_128','data_matrix','qr_code','pdf417'].filter(x=>f.includes(x)); if(want.length) native=new BarcodeDetector({formats:want}); }catch(e){}
@@ -289,24 +295,37 @@ async function initDecoders(){
     hints.set(Z.DecodeHintType.POSSIBLE_FORMATS,[Z.BarcodeFormat.CODE_39,Z.BarcodeFormat.CODE_128,Z.BarcodeFormat.DATA_MATRIX,Z.BarcodeFormat.QR_CODE]);
     zx=new Z.MultiFormatReader(); zx.setHints(hints);
   }
-  // Text recognition for printed VINs (loads ~3 MB the first time, then cached by the browser)
+  // Text recognition: two readers working in parallel for speed (loads once, then cached)
   if(!window.Tesseract) (await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js')) || (await loadScript('https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js'));
   if(window.Tesseract){
     try{
-      ocr=await Tesseract.createWorker('eng',1,{});
-      await ocr.setParameters({tessedit_char_whitelist:'ABCDEFGHJKLMNPRSTUVWXYZ0123456789', tessedit_pageseg_mode:'6'});
+      const sch=Tesseract.createScheduler();
+      const mk=async()=>{ const w=await Tesseract.createWorker('eng',1,{});
+        await w.setParameters({tessedit_char_whitelist:'ABCDEFGHJKLMNPRSTUVWXYZ0123456789', tessedit_pageseg_mode:'6', preserve_interword_spaces:'0'});
+        sch.addWorker(w); ocrWorkers++; };
+      await mk();                      // first reader ready → start reading right away
+      ocr={ recognize:(img)=>sch.addJob('recognize',img) };
+      $('mTxt').classList.add('on');
+      mk().catch(()=>{});              // second reader joins in the background
     }catch(e){ ocr=null; }
   }
   $('mTxt').classList.toggle('on', !!ocr);
   $('mBar').classList.toggle('on', !!(native||zx));
 }
 
+/* ---- camera with the best quality the phone allows ---- */
+let zoomLevel=1, hwZoom=null;
 async function startCamera(){
   unlockAudio();
   $('camErr').classList.add('hidden');
-  try{
-    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}}});
-  }catch(e){
+  const want=[
+    {facingMode:{ideal:'environment'},width:{ideal:3840},height:{ideal:2160},frameRate:{ideal:30}},
+    {facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},
+    {facingMode:'environment'}
+  ];
+  let err=null;
+  for(const v of want){ try{ stream=await navigator.mediaDevices.getUserMedia({audio:false,video:v}); break; }catch(e){ err=e; stream=null; if(e && e.name==='NotAllowedError') break; } }
+  if(!stream){
     const msg = location.protocol!=='https:' && location.hostname!=='localhost'
       ? 'The camera only works when this page is opened from an https:// web address.'
       : 'Camera blocked. Allow camera access for this site in your browser settings, then tap Start Scanning again.';
@@ -315,34 +334,56 @@ async function startCamera(){
   show('scanner');
   video.srcObject=stream; try{ await video.play(); }catch(e){}
   track=stream.getVideoTracks()[0];
-  try{ const caps=track.getCapabilities?track.getCapabilities():{};
+  hwZoom=null;
+  try{
+    const caps=track.getCapabilities?track.getCapabilities():{};
     if(caps.torch) $('torchBtn').classList.remove('hidden');
-    if(caps.focusMode && caps.focusMode.includes('continuous')) await track.applyConstraints({advanced:[{focusMode:'continuous'}]});
+    const adv={};
+    if(caps.focusMode && caps.focusMode.includes('continuous')) adv.focusMode='continuous';
+    if(caps.exposureMode && caps.exposureMode.includes('continuous')) adv.exposureMode='continuous';
+    if(caps.whiteBalanceMode && caps.whiteBalanceMode.includes('continuous')) adv.whiteBalanceMode='continuous';
+    if(Object.keys(adv).length) await track.applyConstraints({advanced:[adv]});
+    if(caps.zoom && caps.zoom.max>1) hwZoom=caps.zoom;
   }catch(e){}
-  seen.clear(); $('box').classList.remove('hit'); setHint('Fit the VIN inside the box');
+  setZoom(zoomLevel);
+  resetReads(); $('box').classList.remove('hit'); setHint('Fit the VIN inside the box','Barcode on the door jamb, or the VIN plate through the windshield');
   running=true;
   ensureDecoders();
   requestAnimationFrame(loop);
 }
+async function setZoom(z){
+  zoomLevel=z;
+  document.querySelectorAll('.zb').forEach(b=>b.classList.toggle('on', +b.dataset.z===z));
+  if(hwZoom && track){
+    try{ await track.applyConstraints({advanced:[{zoom:Math.min(hwZoom.max, Math.max(hwZoom.min, z))}]}); video.style.transform=''; return; }catch(e){}
+  }
+  video.style.transform = z>1 ? 'scale('+z+')' : '';   // digital zoom (crop stays high-res)
+}
+document.querySelectorAll('.zb').forEach(b=>b.onclick=()=>setZoom(+b.dataset.z));
+try{ zoomLevel=+(store.get('vinsnap.zoom',1))||1; }catch(e){}
 function stopCamera(){
   running=false; torchOn=false; $('torchBtn').classList.remove('on');
+  store.set('vinsnap.zoom',zoomLevel);
   if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; track=null; }
 }
 function setHint(t,s){ $('hint').firstChild.nodeValue=t; if(s!==undefined) $('sub').textContent=s; }
 
-// crop the guide box (expanded by `grow`) out of the video frame
-function grab(grow, maxW){
+// crop the guide box (expanded by `grow`) out of the full-resolution video frame
+function grab(grow, maxW, target){
   const vw=video.videoWidth, vh=video.videoHeight; if(!vw) return null;
-  const ew=video.clientWidth, eh=video.clientHeight;
+  const vr=video.getBoundingClientRect(), ew=vr.width, eh=vr.height;   // includes digital zoom
   const sc=Math.max(ew/vw, eh/vh), dw=vw*sc, dh=vh*sc, ox=(ew-dw)/2, oy=(eh-dh)/2;
-  const b=$('box').getBoundingClientRect(), vr=video.getBoundingClientRect();
+  const b=$('box').getBoundingClientRect();
   let x=(b.left-vr.left-ox)/sc, y=(b.top-vr.top-oy)/sc, w=b.width/sc, h=b.height/sc;
   const gx=w*(grow-1)/2, gy=h*(grow-1); x-=gx; w+=gx*2; y-=gy; h+=gy*2;
   x=Math.max(0,x); y=Math.max(0,y); w=Math.min(vw-x,w); h=Math.min(vh-y,h);
   const s=Math.min(1, maxW/w);
-  cv.width=Math.round(w*s); cv.height=Math.round(h*s);
-  ctx.drawImage(video,x,y,w,h,0,0,cv.width,cv.height);
-  return cv;
+  const c=target||cv;
+  c.width=Math.round(w*s); c.height=Math.round(h*s);
+  const g=c===cv?ctx:c.getContext('2d',{willReadFrequently:true});
+  g.imageSmoothingQuality='high';
+  g.drawImage(video,x,y,w,h,0,0,c.width,c.height);
+  return c;
 }
 function rotate90(src){ const c=document.createElement('canvas'); c.width=src.height; c.height=src.width; const g=c.getContext('2d'); g.translate(c.width/2,c.height/2); g.rotate(Math.PI/2); g.drawImage(src,-src.width/2,-src.height/2); return c; }
 
@@ -358,47 +399,170 @@ async function scanBarcode(src){
   }
   return null;
 }
+
+/* ---- image cleanup for text reading ---- */
+// sharpness score (higher = crisper). Used to skip blurry/moving frames.
+function sharpness(src){
+  const w=160, h=Math.max(8,Math.round(src.height*160/src.width)), c=document.createElement('canvas'); c.width=w; c.height=h;
+  const g=c.getContext('2d',{willReadFrequently:true}); g.drawImage(src,0,0,w,h);
+  const d=g.getImageData(0,0,w,h).data, Y=new Float32Array(w*h);
+  for(let i=0,j=0;i<d.length;i+=4,j++) Y[j]=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+  let s=0,s2=0,n=0;
+  for(let y=1;y<h-1;y++) for(let x=1;x<w-1;x++){ const k=y*w+x; const L=4*Y[k]-Y[k-1]-Y[k+1]-Y[k-w]-Y[k+w]; s+=L; s2+=L*L; n++; }
+  return n? s2/n-(s/n)*(s/n) : 0;
+}
 function prepOcr(src){
-  // upscale + grayscale + contrast for small stamped characters
-  const s=Math.max(1, 1400/src.width), c=document.createElement('canvas');
-  c.width=Math.round(src.width*s); c.height=Math.round(src.height*s);
-  const g=c.getContext('2d',{willReadFrequently:true}); g.drawImage(src,0,0,c.width,c.height);
-  const im=g.getImageData(0,0,c.width,c.height), d=im.data; let sum=0;
-  for(let i=0;i<d.length;i+=4){ const y=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; d[i]=y; sum+=y; }
-  const mean=sum/(d.length/4);
-  for(let i=0;i<d.length;i+=4){ let y=(d[i]-mean)*1.8+128; y=y<0?0:y>255?255:y; d[i]=d[i+1]=d[i+2]=y; }
+  // 1) scale so characters are ~40px tall (Tesseract's sweet spot)
+  const tgtH=Math.min(420, Math.max(220, src.height)), s=Math.min(3, tgtH/src.height);
+  const c=document.createElement('canvas'); c.width=Math.round(src.width*s); c.height=Math.round(src.height*s);
+  const g=c.getContext('2d',{willReadFrequently:true}); g.imageSmoothingQuality='high'; g.drawImage(src,0,0,c.width,c.height);
+  const W=c.width, H=c.height, im=g.getImageData(0,0,W,H), d=im.data, N=W*H;
+  // 2) grayscale + histogram
+  const Y=new Float32Array(N), hist=new Uint32Array(256);
+  for(let i=0,j=0;i<d.length;i+=4,j++){ const y=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; Y[j]=y; hist[y|0]++; }
+  // 3) light text on dark plate? → invert so text is dark on light
+  let acc=0, med=0; for(let v=0;v<256;v++){ acc+=hist[v]; if(acc>=N/2){ med=v; break; } }
+  const invert = med < 105;
+  // 4) contrast stretch between 2nd and 98th percentile
+  let lo=0, hi=255; acc=0; for(let v=0;v<256;v++){ acc+=hist[v]; if(acc>=N*0.02){ lo=v; break; } }
+  acc=0; for(let v=255;v>=0;v--){ acc+=hist[v]; if(acc>=N*0.02){ hi=v; break; } }
+  const span=Math.max(24,hi-lo);
+  for(let j=0;j<N;j++){ let y=(Y[j]-lo)*255/span; y=y<0?0:y>255?255:y; Y[j]=invert?255-y:y; }
+  // 5) sharpen (unsharp 3x3) to crisp up stamped / dot-matrix characters
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const k=y*W+x; let v=Y[k];
+    if(x>0&&y>0&&x<W-1&&y<H-1) v=5*Y[k]-Y[k-1]-Y[k+1]-Y[k-W]-Y[k+W];
+    v=v<0?0:v>255?255:v; const p=k*4; d[p]=d[p+1]=d[p+2]=v; d[p+3]=255;
+  }
   g.putImageData(im,0,0); return c;
 }
+
+/* ---- reading + voting: combine several readings letter by letter ---- */
+// Confusion-aware VIN repair. Tries likely OCR mistakes (L↔1, S↔5, Z↔2, B↔8 …), extra/split characters,
+// keeps only fixes that pass the check digit, then ranks them with VIN rules (known maker code, valid year
+// code, numeric serial). Returns {v, score} when one repair clearly wins, else {amb:[…]}.
+const OCRC={'L':['1'],'1':['L','7','T','J'],'7':['1','T'],'T':['7','1'],'J':['1'],'S':['5'],'5':['S'],'Z':['2','7'],'2':['Z'],'B':['8'],'8':['B','3','6'],'3':['8'],'G':['6','C'],'6':['G','8'],'C':['G'],'D':['0'],'0':['D','U','8'],'U':['0','V'],'V':['U','Y'],'Y':['V'],'A':['4'],'4':['A'],'E':['F'],'F':['E','P'],'P':['F','R','9'],'R':['P'],'9':['P'],'M':['N','H'],'N':['M','H'],'H':['N','M'],'K':['X'],'X':['K'],'W':['V']};
+const CHEAP={'L1':1,'1L':1,'S5':1,'5S':1,'Z2':1,'2Z':1,'B8':1,'8B':1,'D0':1,'0D':1,'G6':1,'6G':1};
+const subCost=(a,b)=>CHEAP[a+b]?0.6:1;
+function prior(v){
+  let p=0;
+  if(!(WMI[v.slice(0,3)]||WMI2[v.slice(0,2)])) p+=1.5;
+  if(/[UZ0]/.test(v[9])) p+=3;
+  for(let i=13;i<17;i++) if(/[A-Z]/.test(v[i])) p+=0.7;
+  return p;
+}
+function subs(v, maxS){
+  const out=[]; const pos=[]; for(let i=0;i<17;i++) if(OCRC[v[i]]) pos.push(i);
+  if(valid(v)) out.push({v,e:0});
+  for(const i of pos) for(const a of OCRC[v[i]]){ const t=v.slice(0,i)+a+v.slice(i+1), c1=subCost(v[i],a); if(valid(t)) out.push({v:t,e:c1});
+    if(maxS>1) for(const j of pos) if(j>i) for(const b of OCRC[t[j]]||[]){ const u=t.slice(0,j)+b+t.slice(j+1); if(valid(u)) out.push({v:u,e:c1+subCost(t[j],b)}); } }
+  return out;
+}
+function repair(text){
+  const found=new Map();
+  const add=(v,e)=>{ if(/[IOQ]/.test(v)) return; const s=e+prior(v); if(!found.has(v)||found.get(v)>s) found.set(v,s); };
+  String(text||'').toUpperCase().split(/\n/).forEach(line=>{
+    const raw=line.replace(/[^A-Z0-9]/g,'').replace(/[OQ]/g,'0').replace(/I/g,'1');
+    if(raw.length<17) return;
+    for(let len=17; len<=Math.min(19,raw.length); len++){
+      for(let st=0; st+len<=raw.length; st++){
+        const w=raw.slice(st,st+len), del=len-17;
+        const bases = del===0 ? [w] : del===1 ? [...w].map((_,i)=>w.slice(0,i)+w.slice(i+1)) :
+          (()=>{ const r=[]; for(let i=0;i<len;i++) for(let j=i+1;j<len;j++) r.push(w.slice(0,i)+w.slice(i+1,j)+w.slice(j+1)); return r; })();
+        const cut=(raw.length-len)*0.3;              // prefer using more of the line
+        for(const b of new Set(bases)) for(const c of subs(b, del>=2?1:2)) add(c.v, c.e+del*0.8+cut);
+      }
+    }
+  });
+  if(!found.size) return null;
+  const ranked=[...found].sort((a,b)=>a[1]-b[1]);
+  if(ranked.length===1 || ranked[1][1]-ranked[0][1]>=0.5) return {v:ranked[0][0], score:ranked[0][1]};
+  return {amb:ranked.filter(r=>r[1]-ranked[0][1]<0.5).map(r=>r[0]), score:ranked[0][1]};
+}
+// all plausible repairs from one reading (within 1.0 of the best), as Map(vin -> score)
+function repairSet(text){
+  const r=repairAll(text); if(!r.length) return new Map();
+  const best=r[0][1]; return new Map(r.filter(x=>x[1]-best<=1.0).slice(0,12));
+}
+function repairAll(text){
+  const found=new Map();
+  const add=(v,e)=>{ if(/[IOQ]/.test(v)) return; const s=e+prior(v); if(!found.has(v)||found.get(v)>s) found.set(v,s); };
+  String(text||'').toUpperCase().split(/\n/).forEach(line=>{
+    const raw=line.replace(/[^A-Z0-9]/g,'').replace(/[OQ]/g,'0').replace(/I/g,'1');
+    if(raw.length<17) return;
+    for(let len=17; len<=Math.min(19,raw.length); len++) for(let st=0; st+len<=raw.length; st++){
+      const w=raw.slice(st,st+len), del=len-17;
+      const bases = del===0 ? [w] : del===1 ? [...w].map((_,i)=>w.slice(0,i)+w.slice(i+1)) :
+        (()=>{ const r=[]; for(let i=0;i<len;i++) for(let j=i+1;j<len;j++) r.push(w.slice(0,i)+w.slice(i+1,j)+w.slice(j+1)); return r; })();
+      const cut=(raw.length-len)*0.3;
+      for(const b of new Set(bases)) for(const c of subs(b, del>=2?1:2)) add(c.v, c.e+del*0.8+cut);
+    }
+  });
+  return [...found].sort((a,b)=>a[1]-b[1]);
+}
+// combine several readings: a VIN must show up in at least 2 readings and clearly beat the runner-up
+function combine(sets){
+  if(sets.length<2) return null;
+  const all=new Set(); sets.forEach(s=>s.forEach((_,v)=>all.add(v)));
+  const sc=[...all].map(v=>{ let t=0,hits=0; sets.forEach(s=>{ if(s.has(v)){ t+=s.get(v); hits++; } else t+=2.5; }); return {v,t,hits}; })
+    .filter(x=>x.hits>=2).sort((a,b)=>a.t-b.t);
+  if(!sc.length) return null;
+  if(sc[0].t/sets.length>1.3) return null;            // too many fixes needed: probably not a VIN
+  if(sc.length===1 || sc[1].t-sc[0].t>=1.0) return sc[0].v;
+  return null;
+}
+
+let reads=[], exact=new Map(), sharpMax=0, rsets=[];
+function resetReads(){ reads=[]; exact=new Map(); seen.clear(); sharpMax=0; rsets=[]; }
+function vote(){
+  if(reads.length<3) return null;
+  let out='', weak=0;
+  for(let i=0;i<17;i++){
+    const cnt={}; reads.forEach(r=>{ cnt[r[i]]=(cnt[r[i]]||0)+1; });
+    const [ch,n]=Object.entries(cnt).sort((a,b)=>b[1]-a[1])[0];
+    if(n<2) weak++; out+=ch;
+  }
+  return weak<=1 ? out : null;
+}
+function considerText(text){
+  const cands=ocrCandidates(text);
+  // 1) the same valid VIN read cleanly twice
+  for(const c of cands) if(valid(c)){ const n=(exact.get(c)||0)+1; exact.set(c,n); if(n>=2) return found(c,'text'); break; }
+  // 2) repair likely misreads (L/1, S/5, extra characters …) and confirm across readings
+  const rs=repairSet(text);
+  if(rs.size){ rsets.push(rs); if(rsets.length>5) rsets.shift(); const c=combine(rsets); if(c) return found(c,'text'); }
+  // 3) letter-by-letter majority of 3+ readings that passes the check digit
+  const full=cands.find(c=>/^[A-HJ-NPR-Z0-9]{17}$/.test(c));
+  if(full){ reads.push(full); if(reads.length>7) reads.shift();
+    const v=vote(); if(v && valid(v)) return found(v,'text');
+    // older VINs/imports without a check digit: accept only a very consistent reading
+    if(v && !valid(v) && reads.length>=6 && reads.filter(r=>r===v).length>=4) return found(v,'text',true); }
+  const shown = rs.size ? [...rs.keys()][0] : full;
+  if(shown) setHint('Reading VIN… hold steady', shown.replace(/(.{3})(.{5})(.)(.)(.)/,'$1 $2 $3 $4 $5 '));
+}
 async function runOcr(){
-  if(!ocr||ocrBusy) return; ocrBusy=true; lastOcr=Date.now();
+  if(!ocr || ocrInFlight>=Math.max(1,ocrWorkers)) return;
+  const src=grab(1,1600,document.createElement('canvas')); if(!src) return;
+  // skip blurry frames (hand moving / focusing), but never wait more than ~1.5s
+  const sh=sharpness(src); sharpMax=Math.max(sharpMax*0.97, sh);
+  if(sh < sharpMax*0.55 && Date.now()-lastOcr<1500) return;
+  ocrInFlight++; lastOcr=Date.now();
   try{
-    const src=grab(1,1200); if(!src) return;
     const {data}=await ocr.recognize(prepOcr(src));
-    if(!running) return;
-    let best=null;
-    for(const c of ocrCandidates(data.text)){
-      if(valid(c)){ best={v:c,need:2}; break; }
-      const f=fixes(c); if(f.length===1 && !best) best={v:f[0],need:3};
-    }
-    if(!best){ const raw=ocrCandidates(data.text)[0]; if(raw && /^[A-HJ-NPR-Z0-9]{17}$/.test(raw)) best={v:raw,need:4,unchecked:true}; }
-    if(best){
-      const n=(seen.get(best.v)||0)+1; seen.set(best.v,n);
-      if(n>=best.need) return found(best.v,'text',best.unchecked);
-      setHint('Reading VIN… hold steady', best.v.replace(/(.{3})(.{5})(.)(.)(.)/,'$1 $2 $3 $4 $5 '));
-    }
-  }catch(e){} finally{ ocrBusy=false; }
+    if(running) considerText(data.text);
+  }catch(e){} finally{ ocrInFlight--; }
 }
 async function loop(){
   if(!running) return;
   frameN++;
   try{
     if(native||zx){
-      const src = native ? video : grab(1.6, 900);
+      const src = native ? video : grab(1.6, 1000);
       if(src){ const v=await scanBarcode(src); if(v) return found(v,'barcode'); }
     }
-    if(ocr && !ocrBusy && Date.now()-lastOcr>700) runOcr();
+    if(ocr && Date.now()-lastOcr>250) runOcr();
   }catch(e){}
-  if(running) setTimeout(()=>requestAnimationFrame(loop), native?90:160);
+  if(running) setTimeout(()=>requestAnimationFrame(loop), native?80:140);
 }
 function found(v, how, unchecked){
   if(!running) return; running=false;
@@ -422,7 +586,7 @@ $('photo').onchange=async e=>{
   const s=Math.min(1,1800/Math.max(img.width,img.height)); cv.width=img.width*s; cv.height=img.height*s; ctx.drawImage(img,0,0,cv.width,cv.height);
   setHint('Checking photo…');
   for(const c of [cv, rotate90(cv)]){ const v=await scanBarcode(c); if(v){ running=true; return found(v,'barcode'); } }
-  if(ocr){ try{ const {data}=await ocr.recognize(prepOcr(cv)); for(const c of ocrCandidates(data.text)){ if(valid(c)){ running=true; return found(c,'text'); } } }catch(e){} }
+  if(ocr){ try{ const {data}=await ocr.recognize(prepOcr(cv)); for(const c of ocrCandidates(data.text)){ if(valid(c)){ running=true; return found(c,'text'); } } const r=repair(data.text); if(r&&r.v&&r.score<=1.2){ running=true; return found(r.v,'text',true); } }catch(e){} }
   setHint('No VIN found in that photo','Try again closer, without glare');
 };
 
