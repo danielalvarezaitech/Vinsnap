@@ -38,6 +38,8 @@
   #laser{position:absolute;left:4%;right:4%;height:2px;background:var(--accent);box-shadow:0 0 12px var(--accent);top:50%;animation:sweep 1.6s ease-in-out infinite alternate}
   @keyframes sweep{from{top:12%}to{top:88%}}
   #box.hit::before{border-color:var(--ok)}
+  #box.glare::before,#box.glare::after{border-color:var(--warn)}
+  #glareChip{position:absolute;left:50%;transform:translateX(-50%);top:calc(38% + 18% + 72px);background:var(--warn);color:#1a1200;font-weight:800;font-size:13px;border-radius:999px;padding:5px 12px}
   .topbar{position:absolute;left:0;right:0;top:0;padding:calc(var(--st) + 10px) 14px 10px;display:flex;justify-content:space-between;align-items:center;background:linear-gradient(rgba(0,0,0,.6),transparent)}
   .topbar b{font-size:18px}
   .icon-btn{background:rgba(255,255,255,.14);color:#fff;border:0;border-radius:999px;padding:10px 14px;font-weight:700;cursor:pointer;backdrop-filter:blur(8px)}
@@ -113,6 +115,7 @@
   <video id="video" playsinline muted autoplay></video>
   <div id="modes"><span class="mode on" id="mBar">Barcode</span><span class="mode on" id="mTxt">Printed VIN</span></div>
   <div id="box"><div id="laser"></div></div>
+  <div id="glareChip" class="hidden">☀️ Glare fix on</div>
   <div class="topbar">
     <button class="icon-btn" id="closeBtn" type="button">✕</button>
     <b>Scanning…</b>
@@ -267,7 +270,7 @@ const makeOf = v => WMI[v.slice(0,3)] || WMI2[v.slice(0,2)] || '';
 /* ================= camera + live scanning ================= */
 let stream=null, track=null, running=false, torchOn=false;
 const video=$('video'), cv=$('cv'), ctx=cv.getContext('2d',{willReadFrequently:true});
-let native=null, zx=null, ocr=null, ocrBusy=false, lastOcr=0, frameN=0;
+let native=null, zx=null, zxHard=null, ocr=null, ocrBusy=false, lastOcr=0, frameN=0;
 const seen=new Map(); // candidate -> count (OCR confirmation)
 let audioCtx=null;
 
@@ -294,6 +297,7 @@ async function initDecoders(){
     const Z=window.ZXing, hints=new Map();
     hints.set(Z.DecodeHintType.POSSIBLE_FORMATS,[Z.BarcodeFormat.CODE_39,Z.BarcodeFormat.CODE_128,Z.BarcodeFormat.DATA_MATRIX,Z.BarcodeFormat.QR_CODE]);
     zx=new Z.MultiFormatReader(); zx.setHints(hints);
+    const hh=new Map(hints); hh.set(Z.DecodeHintType.TRY_HARDER,true); zxHard=new Z.MultiFormatReader(); zxHard.setHints(hh);
   }
   // Text recognition: two readers working in parallel for speed (loads once, then cached)
   if(!window.Tesseract) (await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js')) || (await loadScript('https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js'));
@@ -344,9 +348,10 @@ async function startCamera(){
     if(caps.whiteBalanceMode && caps.whiteBalanceMode.includes('continuous')) adv.whiteBalanceMode='continuous';
     if(Object.keys(adv).length) await track.applyConstraints({advanced:[adv]});
     if(caps.zoom && caps.zoom.max>1) hwZoom=caps.zoom;
+    expCaps = caps.exposureCompensation && caps.exposureCompensation.min<0 ? caps.exposureCompensation : null; expCur=0;
   }catch(e){}
   setZoom(zoomLevel);
-  resetReads(); $('box').classList.remove('hit'); setHint('Fit the VIN inside the box','Barcode on the door jamb, or the VIN plate through the windshield');
+  resetReads(); stack=[]; recent=[]; glareOn=false; glareSince=0; $('box').classList.remove('hit','glare'); $('glareChip').classList.add('hidden'); setHint('Fit the VIN inside the box','Barcode on the door jamb, or the VIN plate through the windshield');
   running=true;
   ensureDecoders();
   requestAnimationFrame(loop);
@@ -387,15 +392,111 @@ function grab(grow, maxW, target){
 }
 function rotate90(src){ const c=document.createElement('canvas'); c.width=src.height; c.height=src.width; const g=c.getContext('2d'); g.translate(c.width/2,c.height/2); g.rotate(Math.PI/2); g.drawImage(src,-src.width/2,-src.height/2); return c; }
 
-async function scanBarcode(src){
+/* ================= glare handling ================= */
+// Glare washes out part of a barcode or VIN plate. VIN Snap now: (1) spots glare and tells you to tilt,
+// (2) flattens uneven light so half-washed bars become readable, (3) combines several frames so moving
+// glare spots cancel out, (4) lowers exposure on phones that allow it, and (5) auto-captures the clearest
+// recent frame for a slower, more thorough check.
+let glareOn=false, glareSince=0, glareClearSince=0, stack=[], deepLast=0, recent=[], expCaps=null, expCur=0, photoLast=0;
+function grayOf(c){ const g=c.getContext('2d',{willReadFrequently:true}); const d=g.getImageData(0,0,c.width,c.height).data; const Y=new Uint8ClampedArray(c.width*c.height); for(let i=0,j=0;i<d.length;i+=4,j++) Y[j]=(77*d[i]+150*d[i+1]+29*d[i+2])>>8; return Y; }
+function toCanvas(Y,w,h){ const c=document.createElement('canvas'); c.width=w; c.height=h; const g=c.getContext('2d'); const im=g.createImageData(w,h), d=im.data; for(let j=0,i=0;j<Y.length;j++,i+=4){ d[i]=d[i+1]=d[i+2]=Y[j]; d[i+3]=255; } g.putImageData(im,0,0); return c; }
+function glareLevel(Y){ let n=0,t=0; for(let j=0;j<Y.length;j+=5){ t++; if(Y[j]>=246) n++; } return t?n/t:0; }
+function stretch(Y){ const hist=new Uint32Array(256); for(let j=0;j<Y.length;j++) hist[Y[j]]++; const N=Y.length; let a=0,lo=0,hi=255;
+  for(let v=0;v<256;v++){ a+=hist[v]; if(a>=N*0.01){ lo=v; break; } } a=0; for(let v=255;v>=0;v--){ a+=hist[v]; if(a>=N*0.01){ hi=v; break; } }
+  const sp=Math.max(16,hi-lo), out=new Uint8ClampedArray(N); for(let j=0;j<N;j++) out[j]=(Y[j]-lo)*255/sp; return out; }
+// local contrast normalization: in every small area, stretch the difference between bars and background.
+// Faint bars inside a glare spot become as dark/bright as the rest of the barcode.
+function flatten(Y,w,h){
+  const N=w*h, r=Math.max(8,Math.round(Math.min(w,h)/12)), W1=w+1;
+  const I=new Float64Array(W1*(h+1)), I2=new Float64Array(W1*(h+1));
+  for(let y=0;y<h;y++){ let s=0,s2=0; for(let x=0;x<w;x++){ const v=Y[y*w+x]; s+=v; s2+=v*v; const k=(y+1)*W1+x+1; I[k]=I[k-W1]+s; I2[k]=I2[k-W1]+s2; } }
+  const out=new Uint8ClampedArray(N);
+  for(let y=0;y<h;y++){ const y0=Math.max(0,y-r), y1=Math.min(h,y+r+1);
+    for(let x=0;x<w;x++){ const x0=Math.max(0,x-r), x1=Math.min(w,x+r+1), n=(y1-y0)*(x1-x0);
+      const a=y1*W1+x1, b=y0*W1+x1, c=y1*W1+x0, d=y0*W1+x0;
+      const m=(I[a]-I[b]-I[c]+I[d])/n, v2=(I2[a]-I2[b]-I2[c]+I2[d])/n, sd=Math.sqrt(Math.max(0,v2-m*m));
+      out[y*w+x]=128+70*(Y[y*w+x]-m)/(sd+6); } }
+  return out;
+}
+// per-pixel 2nd-darkest across recent frames: a glare spot that moves even slightly disappears
+function fuse(){
+  if(stack.length<3) return null; const w=stack[0].w, h=stack[0].h; if(stack.some(f=>f.w!==w||f.h!==h)) return null;
+  const n=stack.length, out=new Uint8ClampedArray(w*h);
+  const take2=n>=5;   // with few frames use the darkest value, with more use the 2nd-darkest (less noise)
+  for(let j=0;j<out.length;j++){ let m1=255,m2=255; for(let k=0;k<n;k++){ const v=stack[k].Y[j]; if(v<m1){ m2=m1; m1=v; } else if(v<m2) m2=v; } out[j]=take2?m2:m1; }
+  return toCanvas(stretch(out),w,h);
+}
+async function adjustExposure(level){
+  if(!expCaps || !track) return;
+  const now=Date.now();
+  if(level>0.04){ glareClearSince=0; if(now-glareSince>600 && expCur>Math.max(expCaps.min,-2)){ expCur=Math.max(expCaps.min,-2,expCur-(expCaps.step||0.33)*2); try{ await track.applyConstraints({advanced:[{exposureCompensation:expCur}]}); }catch(e){ expCaps=null; } } }
+  else if(level<0.01 && expCur<0){ glareClearSince=glareClearSince||now; if(now-glareClearSince>2500){ expCur=0; try{ await track.applyConstraints({advanced:[{exposureCompensation:0}]}); }catch(e){} } }
+}
+function updateGlare(level){
+  const now=Date.now(), was=glareOn;
+  if(level>0.025){ if(!glareSince) glareSince=now; if(now-glareSince>250) glareOn=true; }
+  else if(level<0.01){ glareSince=0; glareOn=false; }
+  $('box').classList.toggle('glare',glareOn);
+  $('glareChip').classList.toggle('hidden',!glareOn);
+  if(glareOn && !was){
+    setHint('Glare detected: tilt the phone a little','Or step to the side so the light isn’t reflecting on the sticker');
+    if(torchOn){ torchOn=false; try{ track.applyConstraints({advanced:[{torch:false}]}); }catch(e){} $('torchBtn').classList.remove('on'); toast('Light off to cut the glare'); }
+  } else if(!glareOn && was) setHint('Fit the VIN inside the box','Barcode on the door jamb, or the VIN plate through the windshield');
+  adjustExposure(level);
+}
+// try one picture with a given reader & binarizer
+function zxTry(reader, c, global){
+  const Z=window.ZXing;
+  try{ const L=new Z.HTMLCanvasElementLuminanceSource(c); const bin=global?new Z.GlobalHistogramBinarizer(L):new Z.HybridBinarizer(L);
+    return findVin(reader.decode(new Z.BinaryBitmap(bin)).getText()); }catch(e){ return null; } finally{ try{ reader.reset(); }catch(e){} }
+}
+async function nativeTry(c){ try{ for(const r of await native.detect(c)){ const v=findVin(r.rawValue); if(v) return v; } }catch(e){} return null; }
+// fast pass: every frame tries one version of the picture (raw, rotated, light-flattened, glare-fused …)
+async function scanBarcode(){
+  const src=grab(1.6,1000,document.createElement('canvas')); if(!src) return null;
+  const Y=grayOf(src), w=src.width, h=src.height, lvl=glareLevel(Y);
+  updateGlare(lvl);
+  stack.push({Y,w,h}); if(stack.length>6) stack.shift();
+  const sh=sharpness(src); recent.push({c:src,Y,w,h,score:sh*(1-Math.min(0.9,lvl*8))}); if(recent.length>8) recent.shift();
   if(native){
-    try{ for(const c of await native.detect(src)){ const v=findVin(c.rawValue); if(v) return v; } }catch(e){}
+    let v=await nativeTry(video); if(v) return v;
+    if(frameN%2===0){ v=await nativeTry(toCanvas(flatten(Y,w,h),w,h)); if(v) return v; }
+    if(glareOn && frameN%3===0){ const f=fuse(); if(f){ v=await nativeTry(f); if(v) return v; } }
     return null;
   }
   if(zx){
-    const Z=window.ZXing;
-    const tryOne = c => { try{ return findVin(zx.decode(new Z.BinaryBitmap(new Z.HybridBinarizer(new Z.HTMLCanvasElementLuminanceSource(c)))).getText()); }catch(e){ return null; } finally{ try{zx.reset();}catch(e){} } };
-    return tryOne(frameN%2 ? rotate90(src) : src);
+    const k=frameN%6;
+    if(k===0) return zxTry(zx,src,false);
+    if(k===1) return zxTry(zx,rotate90(src),false);
+    if(k===2) return zxTry(zx,toCanvas(flatten(Y,w,h),w,h),false);
+    if(k===3) return zxTry(zx,src,true);
+    if(k===4) return zxTry(zx,rotate90(toCanvas(flatten(Y,w,h),w,h)),false);
+    const f=glareOn?fuse():null; return zxTry(zx, f||toCanvas(flatten(Y,w,h),w,h), true);
+  }
+  return null;
+}
+// auto-capture: every ~0.8s take the clearest recent frame (least glare, sharpest) and check it thoroughly
+let deepIdx=0;
+async function deepCheck(){
+  if(!(zxHard||native) || !recent.length) return null;
+  const now=Date.now(); if(now-deepLast<(glareOn?700:1200)) return null; deepLast=now;
+  const best=recent.reduce((a,b)=>b.score>a.score?b:a);
+  const flat=toCanvas(flatten(best.Y,best.w,best.h),best.w,best.h), fused=fuse();
+  const variants=[[best.c,false],[flat,false],[fused,false],[best.c,true],[rotate90(flat),false],[flat,true],[rotate90(best.c),false],[fused,true]].filter(v=>v[0]);
+  const t0=performance.now();
+  for(let n=0;n<variants.length && performance.now()-t0<220;n++){
+    const [c,g]=variants[(deepIdx++)%variants.length];
+    const v = native ? await nativeTry(c) : zxTry(zxHard,c,g);
+    if(v) return v;
+  }
+  // Android: grab a full-resolution still photo (often HDR) when glare keeps getting in the way
+  if(glareOn && 'ImageCapture' in window && track && now-photoLast>2500){
+    photoLast=now;
+    try{
+      const blob=await new ImageCapture(track).takePhoto(), bmp=await createImageBitmap(blob);
+      const s=Math.min(1,1800/Math.max(bmp.width,bmp.height)), c=document.createElement('canvas'); c.width=bmp.width*s; c.height=bmp.height*s; c.getContext('2d').drawImage(bmp,0,0,c.width,c.height);
+      for(const im of [c, rotate90(c)]){ const v = native ? await nativeTry(im) : zxTry(zxHard,im,false); if(v) return v; }
+    }catch(e){}
   }
   return null;
 }
@@ -548,7 +649,8 @@ async function runOcr(){
   if(sh < sharpMax*0.55 && Date.now()-lastOcr<1500) return;
   ocrInFlight++; lastOcr=Date.now();
   try{
-    const {data}=await ocr.recognize(prepOcr(src));
+    const img = glareOn ? toCanvas(flatten(grayOf(src),src.width,src.height),src.width,src.height) : src;
+    const {data}=await ocr.recognize(prepOcr(img));
     if(running) considerText(data.text);
   }catch(e){} finally{ ocrInFlight--; }
 }
@@ -557,8 +659,8 @@ async function loop(){
   frameN++;
   try{
     if(native||zx){
-      const src = native ? video : grab(1.6, 1000);
-      if(src){ const v=await scanBarcode(src); if(v) return found(v,'barcode'); }
+      let v=await scanBarcode(); if(v) return found(v,'barcode');
+      v=await deepCheck(); if(v) return found(v,'barcode');
     }
     if(ocr && Date.now()-lastOcr>250) runOcr();
   }catch(e){}
@@ -585,7 +687,8 @@ $('photo').onchange=async e=>{
   const img=new Image(); img.src=URL.createObjectURL(f); await img.decode().catch(()=>{});
   const s=Math.min(1,1800/Math.max(img.width,img.height)); cv.width=img.width*s; cv.height=img.height*s; ctx.drawImage(img,0,0,cv.width,cv.height);
   setHint('Checking photo…');
-  for(const c of [cv, rotate90(cv)]){ const v=await scanBarcode(c); if(v){ running=true; return found(v,'barcode'); } }
+  { const Y=grayOf(cv), fl=toCanvas(flatten(Y,cv.width,cv.height),cv.width,cv.height);
+    for(const c of [cv, fl, rotate90(cv), rotate90(fl)]){ const v = native ? await nativeTry(c) : (zxHard||zx) ? (zxTry(zxHard||zx,c,false)||zxTry(zxHard||zx,c,true)) : null; if(v){ running=true; return found(v,'barcode'); } } }
   if(ocr){ try{ const {data}=await ocr.recognize(prepOcr(cv)); for(const c of ocrCandidates(data.text)){ if(valid(c)){ running=true; return found(c,'text'); } } const r=repair(data.text); if(r&&r.v&&r.score<=1.2){ running=true; return found(r.v,'text',true); } }catch(e){} }
   setHint('No VIN found in that photo','Try again closer, without glare');
 };
@@ -668,6 +771,8 @@ async function decode(v){
 /* ---- lookup links ---- */
 const SITES=[
   {name:'BAR Smog / Inspection History',desc:'bar.ca.gov · CA smog & VSSI results',url:'https://www.bar.ca.gov/inspection'},
+  {name:'DealerCenter: KBB Book Value',desc:'dmsapp.dealercenter.net · KBB, appraisal & inventory',url:'https://dmsapp.dealercenter.net/'},
+  {name:'KBB.com: What\'s My Car Worth',desc:'kbb.com · public trade-in & private-party value',url:'https://www.kbb.com/whats-my-car-worth/'},
   {name:'Carfax for Dealers: Direct report',desc:'carfaxonline.com · sign in first',url:'https://www.carfaxonline.com/vhrs/{VIN}'},
   {name:'AutoCheck',desc:'autocheck.com · vehicle history',url:'https://www.autocheck.com/vehiclehistory/?vin={VIN}'},
   {name:'NHTSA Recalls',desc:'nhtsa.gov · open safety recalls',url:'https://www.nhtsa.gov/recalls?vin={VIN}'},
