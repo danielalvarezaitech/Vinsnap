@@ -89,6 +89,14 @@
   .add input{width:100%;background:#0b0d11;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:11px;margin-top:8px;font-size:15px}
   .hist{display:flex;flex-direction:column;gap:6px}
   .hist button{text-align:left;background:#202533;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:9px 10px;font:600 14px ui-monospace,Menlo,monospace;cursor:pointer}
+  #bcInline{background:#fff;border-radius:10px;padding:10px 8px;cursor:pointer}
+  #bcInline svg{display:block;width:100%;height:90px}
+  #bcFull{position:fixed;inset:0;background:#fff;z-index:200;overflow:hidden;cursor:pointer}
+  #bcFull .rot{position:absolute;top:50%;left:50%;width:100vh;height:100vw;transform:translate(-50%,-50%) rotate(90deg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px}
+  #bcBig{width:94%}
+  #bcBig svg{display:block;width:100%;height:46vw}
+  #bcText{font:800 7vw/1 ui-monospace,Menlo,monospace;letter-spacing:.35vw;color:#000}
+  #bcTip,.bcTip{font-size:3.4vw;color:#555;text-align:center;padding:0 4vw}
   #toast{position:fixed;left:50%;bottom:calc(var(--sb) + 24px);transform:translateX(-50%) translateY(120px);background:#fff;color:#000;font-weight:800;border-radius:999px;padding:11px 18px;transition:transform .25s;z-index:99;white-space:nowrap}
   #toast.show{transform:translateX(-50%) translateY(0)}
   .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--muted);border-top-color:transparent;border-radius:50%;animation:s .8s linear infinite;vertical-align:-2px;margin-right:6px}
@@ -143,7 +151,11 @@
     <div id="check"></div>
     <div class="sugg" id="sugg"></div>
     <div id="snapWrap" class="hidden"><div class="note" style="margin:10px 0 6px">What the camera saw (compare before you submit):</div><img id="snapImg" alt="Scanned VIN" style="width:100%;border-radius:8px;border:1px solid var(--line);background:#000"></div>
-    <div class="row"><button class="btn okb" id="copyBtn" type="button">Copy VIN</button></div>
+    <div id="bcWrap" class="hidden">
+      <div class="note" style="margin:12px 0 6px">VIN barcode for the smog machine. Tap it to make it full-screen:</div>
+      <div id="bcInline" role="button" aria-label="Show VIN barcode full screen"></div>
+    </div>
+    <div class="row"><button class="btn okb" id="copyBtn" type="button">Copy VIN</button><button class="btn primary" id="bcBtn" type="button">Show Barcode</button></div>
   </div>
 
   <div class="card" id="decCard">
@@ -171,6 +183,13 @@
   </div>
 </section>
 
+<div id="bcFull" class="hidden" role="dialog" aria-label="VIN barcode">
+  <div class="rot">
+    <div id="bcBig"></div>
+    <div id="bcText"></div>
+    <div class="bcTip">Turn screen brightness all the way up · Hold 4–8 in. from the scanner · Tap to close</div>
+  </div>
+</div>
 <div id="toast"></div>
 <canvas id="cv" hidden></canvas>
 
@@ -745,12 +764,48 @@ function evaluate(){
     ch.innerHTML=alts.length?'<span class="bad-t">✗ Check digit doesn\'t match. Tap the likely fix or compare with the car:</span>':'<span class="warn-t">⚠ Check digit doesn\'t match. Verify against the car. (Pre-1981 and some imports don\'t use one.)</span>';
     alts.forEach(a=>{ const b=document.createElement('button'); b.className='chip'; let h=''; for(let i=0;i<17;i++) h+=a[i]!==v[i]?'<span style="color:var(--accent)">'+a[i]+'</span>':a[i]; b.innerHTML=h; b.onclick=()=>{vinEl.value=a;evaluate();}; $('sugg').appendChild(b); });
   }
-  renderLinks(); decode(v);
+  renderLinks(); decode(v); renderBarcode(v);
 }
 vinEl.addEventListener('input',evaluate);
 async function copyVin(quiet){ const v=clean(vinEl.value); if(!v) return toast('No VIN yet');
   try{ await navigator.clipboard.writeText(v); toast(quiet?'VIN copied, paste it on the site':'Copied '+v); }catch(e){ vinEl.focus(); vinEl.select(); if(!quiet) toast('Long-press the VIN to copy'); } }
 $('copyBtn').onclick=()=>{ copyVin(false); remember(clean(vinEl.value)); };
+
+// Code 39 encoder (each pattern: 9 elements bar/space alternating, 1 = wide). Exactly 3 wide per character.
+const C39={'0':'000110100','1':'100100001','2':'001100001','3':'101100000','4':'000110001','5':'100110000','6':'001110000','7':'000100101','8':'100100100','9':'001100100',
+'A':'100001001','B':'001001001','C':'101001000','D':'000011001','E':'100011000','F':'001011000','G':'000001101','H':'100001100','I':'001001100','J':'000011100',
+'K':'100000011','L':'001000011','M':'101000010','N':'000010011','O':'100010010','P':'001010010','Q':'000000111','R':'100000110','S':'001000110','T':'000010110',
+'U':'110000001','V':'011000001','W':'111000000','X':'010010001','Y':'110010000','Z':'011010000','-':'010000101','.':'110000100',' ':'011000100','*':'010010100'};
+function code39Svg(text, opts){
+  opts=opts||{}; const N=1, Wd=3, h=opts.height||60, q=10; let x=q; const rects=[];
+  const s='*'+text.toUpperCase()+'*';
+  for(let ci=0; ci<s.length; ci++){
+    const p=C39[s[ci]]; if(!p) throw new Error('bad char '+s[ci]);
+    for(let i=0;i<9;i++){ const w=p[i]==='1'?Wd:N; if(i%2===0) rects.push('<rect x="'+x+'" y="0" width="'+w+'" height="'+h+'"/>'); x+=w; }
+    if(ci<s.length-1) x+=N;   // narrow gap between characters
+  }
+  const W=x+q;
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+W+' '+h+'" preserveAspectRatio="none" shape-rendering="crispEdges"><rect width="'+W+'" height="'+h+'" fill="#fff"/><g fill="#000">'+rects.join('')+'</g></svg>';
+}
+
+/* ---- VIN barcode (Code 39, same format as door-jamb VIN labels) ---- */
+let wakeLock=null;
+function renderBarcode(v){
+  const ok=v.length===17;
+  $('bcWrap').classList.toggle('hidden',!ok); $('bcBtn').classList.toggle('hidden',!ok);
+  if(!ok) return;
+  try{ $('bcInline').innerHTML=code39Svg(v,{height:60}); }catch(e){ $('bcWrap').classList.add('hidden'); $('bcBtn').classList.add('hidden'); }
+}
+async function showBarcode(){
+  const v=clean(vinEl.value); if(v.length!==17) return toast('Need a full 17-character VIN');
+  if(!valid(v)) toast('Check digit doesn\'t match. Double-check the VIN first');
+  $('bcBig').innerHTML=code39Svg(v,{height:60}); $('bcText').textContent=v;
+  $('bcFull').classList.remove('hidden');
+  try{ if('wakeLock' in navigator) wakeLock=await navigator.wakeLock.request('screen'); }catch(e){}
+  remember(v);
+}
+function hideBarcode(){ $('bcFull').classList.add('hidden'); try{ wakeLock&&wakeLock.release(); }catch(e){} wakeLock=null; }
+$('bcBtn').onclick=showBarcode; $('bcInline').onclick=showBarcode; $('bcFull').onclick=hideBarcode;
 
 /* ---- decode: NHTSA (online) with offline fallback ---- */
 const decCache=store.get('vinsnap.nhtsa',{});
