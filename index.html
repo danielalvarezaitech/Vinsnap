@@ -740,11 +740,26 @@ function engineText(r){
   if(r.EngineHP) parts.push('('+Math.round(+r.EngineHP)+' hp)');
   return parts.join(' ');
 }
+// Commercial vehicles (trucks, vans, buses, cab-chassis, trailers): show GVWR from NHTSA
+function isCommercial(r){
+  const t=(r.VehicleType||'').toUpperCase(), b=(r.BodyClass||'').toLowerCase();
+  return /TRUCK|BUS|INCOMPLETE|TRAILER/.test(t) || /cargo|chassis|cutaway|step van|stake|dump|box truck|pickup|bus/.test(b);
+}
+function gvwrText(r){
+  const f=s=>{ if(!s) return ''; const m=String(s).match(/Class\s*([0-9A-H]+)[^:]*:\s*([^()]+?)\s*(?:\(|$)/i);
+    return m ? 'Class '+m[1].toUpperCase()+' · '+m[2].replace(/\s*-\s*/,'–').replace(/\s+/g,' ').trim() : String(s).replace(/\s*\(.*\)/,'').trim(); };
+  const a=f(r.GVWR), b=f(r.GVWR_to);
+  return a && b && a!==b ? a+'  to  '+b : a||b;
+}
 function showNhtsa(v,r){
   const yr=r.ModelYear||modelYear(v), mk=r.Make?r.Make.replace(/\b\w+/g,w=>w[0]+w.slice(1).toLowerCase()):makeOf(v);
   $('ymm').innerHTML=''; const h=document.createElement('div'); h.textContent=[yr,mk,r.Model].filter(Boolean).join(' ');
   const s=document.createElement('small'); s.textContent=[r.Trim,r.Series].filter(Boolean).join(' · ')||('Built in '+countryOf(v)); h.appendChild(s); $('ymm').appendChild(h);
   $('dec').innerHTML='';
+  const com=isCommercial(r), gv=gvwrText(r);
+  if(com){ const tag=document.createElement('span'); tag.className='tag paste'; tag.style.cssText='margin-left:8px;vertical-align:3px;font-size:11px'; tag.textContent='COMMERCIAL'; $('ymm').firstChild.insertBefore(tag,$('ymm').firstChild.querySelector('small')); }
+  if(com) row('GVWR', gv || 'Not listed by NHTSA, check the door-jamb label');
+  if(com && r.VehicleType) row('Vehicle type', r.VehicleType.charAt(0)+r.VehicleType.slice(1).toLowerCase());
   row('Engine',engineText(r)); row('Fuel',r.FuelTypePrimary); row('Transmission',[r.TransmissionSpeeds&&r.TransmissionSpeeds+'-speed',r.TransmissionStyle].filter(Boolean).join(' '));
   row('Drive',r.DriveType); row('Body',[r.BodyClass,r.Doors&&r.Doors+'-door'].filter(Boolean).join(', '));
   row('Built in',[r.PlantCity,r.PlantState,r.PlantCountry].filter(Boolean).map(x=>x.replace(/\s*\(.*\)/,'').replace(/\b\w+/g,w=>w[0]+w.slice(1).toLowerCase())).join(', '));
