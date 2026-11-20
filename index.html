@@ -89,8 +89,22 @@
   .add input{width:100%;background:#0b0d11;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:11px;margin-top:8px;font-size:15px}
   .hist{display:flex;flex-direction:column;gap:6px}
   .hist button{text-align:left;background:#202533;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:9px 10px;font:600 14px ui-monospace,Menlo,monospace;cursor:pointer}
-  #bcInline{background:#fff;border-radius:10px;padding:10px 8px;cursor:pointer}
-  #bcInline svg{display:block;width:100%;height:90px}
+  #bcInline,#comboInline{background:#fff;border-radius:10px;padding:10px 8px;cursor:pointer}
+  #bcInline svg,#comboInline svg{display:block;width:100%;height:90px}
+  /* ---------- plate + combined barcode ---------- */
+  #plate,#pstate{background:#0b0d11;color:var(--text);border:2px solid var(--line);border-radius:10px;padding:14px 10px;
+    font:700 21px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:2px;text-transform:uppercase;min-width:0}
+  #plate{flex:1} #pstate{flex:0 0 74px;text-align:center;letter-spacing:1px}
+  #plate.good{border-color:var(--ok)}
+  #pcheck{font-size:14px;margin-top:8px;min-height:20px}
+  #comboText{font:700 14px ui-monospace,Menlo,monospace;word-break:break-all;margin-top:6px;color:var(--muted)}
+  .opts{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+  .opts select{width:100%;background:#0b0d11;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:15px}
+  .opts label{font-size:12px;color:var(--muted);display:block}
+  #plateCard.next{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+  #scanner.plate #box{top:30%;height:26%}
+  #scanner.plate #modes{top:calc(30% - 46px)}
+  #scanner.plate #laser{display:none}
   #bcFull{position:fixed;inset:0;background:#fff;z-index:200;overflow:hidden;cursor:pointer}
   #bcFull .rot{position:absolute;top:50%;left:50%;width:100vh;height:100vw;transform:translate(-50%,-50%) rotate(90deg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px}
   #bcBig{width:94%}
@@ -121,12 +135,12 @@
 <!-- SCANNER -->
 <section id="scanner" class="hidden">
   <video id="video" playsinline muted autoplay></video>
-  <div id="modes"><span class="mode on" id="mBar">Barcode</span><span class="mode on" id="mTxt">Printed VIN</span></div>
+  <div id="modes"><span class="mode on" id="mBar">Barcode</span><span class="mode on" id="mTxt">Printed VIN</span><span class="mode on hidden" id="mPlate">License plate</span></div>
   <div id="box"><div id="laser"></div></div>
   <div id="glareChip" class="hidden">☀️ Glare fix on</div>
   <div class="topbar">
     <button class="icon-btn" id="closeBtn" type="button">✕</button>
-    <b>Scanning…</b>
+    <b id="scanTitle">Scanning…</b>
     <button class="icon-btn hidden" id="torchBtn" type="button">💡 Light</button>
   </div>
   <div id="hint">Fit the VIN inside the box<small id="sub">Barcode on the door jamb, or the VIN plate through the windshield</small></div>
@@ -156,6 +170,31 @@
       <div id="bcInline" role="button" aria-label="Show VIN barcode full screen"></div>
     </div>
     <div class="row"><button class="btn okb" id="copyBtn" type="button">Copy VIN</button><button class="btn primary" id="bcBtn" type="button">Show Barcode</button></div>
+  </div>
+
+  <div class="card" id="plateCard">
+    <h2>License plate</h2>
+    <div class="row" style="margin-top:0">
+      <input id="plate" maxlength="10" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Plate number">
+      <input id="pstate" maxlength="2" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ST" aria-label="State">
+    </div>
+    <div id="pcheck"></div>
+    <div class="row"><button class="btn primary" id="plateScanBtn" type="button">🎯 Scan plate</button><button class="btn" id="platePhotoBtn" type="button" style="flex:0 0 auto;padding:13px 16px">📷 Photo</button></div>
+    <input id="platePhoto" type="file" accept="image/*" capture="environment" hidden>
+    <div id="comboWrap" class="hidden">
+      <div class="note" style="margin:12px 0 6px">VIN + plate barcode (Code 39). Tap it to make it full-screen:</div>
+      <div id="comboInline" role="button" aria-label="Show VIN and plate barcode full screen"></div>
+      <div id="comboText"></div>
+      <div class="row"><button class="btn okb" id="copyComboBtn" type="button">Copy VIN + plate</button><button class="btn primary" id="comboBtn" type="button">Show Barcode</button></div>
+    </div>
+    <details style="margin-top:10px">
+      <summary>Barcode format</summary>
+      <div class="opts">
+        <label>Separator<select id="cSep"><option value="-">Hyphen  ( - )</option><option value=".">Period  ( . )</option><option value=" ">Space</option><option value="">None</option></select></label>
+        <label>Order<select id="cOrder"><option value="vp">VIN, then plate</option><option value="pv">Plate, then VIN</option></select></label>
+      </div>
+      <p class="note">The VIN is always 17 characters, so your system can split the scan at character 17 even with no separator. Plates are stored without spaces.</p>
+    </details>
   </div>
 
   <div class="card" id="decCard">
@@ -352,9 +391,14 @@ async function startCamera(){
     const msg = location.protocol!=='https:' && location.hostname!=='localhost'
       ? 'The camera only works when this page is opened from an https:// web address.'
       : 'Camera blocked. Allow camera access for this site in your browser settings, then tap Start Scanning again.';
+    if(target==='plate'){ show('result'); $('pcheck').innerHTML='<span class="warn-t">'+msg+' You can use 📷 Photo instead.</span>'; return; }
     $('camErr').textContent=msg; $('camErr').classList.remove('hidden'); show('start'); return;
   }
   show('scanner');
+  $('scanner').classList.toggle('plate', target==='plate');
+  $('scanTitle').textContent = target==='plate' ? 'Scanning plate…' : 'Scanning VIN…';
+  $('mBar').classList.toggle('hidden', target==='plate'); $('mTxt').classList.toggle('hidden', target==='plate'); $('mPlate').classList.toggle('hidden', target!=='plate');
+  $('photoBtn').textContent='📷 Use photo'; $('typeBtn').textContent = target==='plate' ? '⌨️ Type plate' : '⌨️ Type VIN';
   video.srcObject=stream; try{ await video.play(); }catch(e){}
   track=stream.getVideoTracks()[0];
   hwZoom=null;
@@ -370,7 +414,8 @@ async function startCamera(){
     expCaps = caps.exposureCompensation && caps.exposureCompensation.min<0 ? caps.exposureCompensation : null; expCur=0;
   }catch(e){}
   setZoom(zoomLevel);
-  resetReads(); stack=[]; recent=[]; glareOn=false; glareSince=0; $('box').classList.remove('hit','glare'); $('glareChip').classList.add('hidden'); setHint('Fit the VIN inside the box','Barcode on the door jamb, or the VIN plate through the windshield');
+  resetReads(); stack=[]; recent=[]; glareOn=false; glareSince=0; $('box').classList.remove('hit','glare'); $('glareChip').classList.add('hidden'); defaultHint();
+  plateReads=[];
   running=true;
   ensureDecoders();
   requestAnimationFrame(loop);
@@ -460,7 +505,7 @@ function updateGlare(level){
   if(glareOn && !was){
     setHint('Glare detected: tilt the phone a little','Or step to the side so the light isn’t reflecting on the sticker');
     if(torchOn){ torchOn=false; try{ track.applyConstraints({advanced:[{torch:false}]}); }catch(e){} $('torchBtn').classList.remove('on'); toast('Light off to cut the glare'); }
-  } else if(!glareOn && was) setHint('Fit the VIN inside the box','Barcode on the door jamb, or the VIN plate through the windshield');
+  } else if(!glareOn && was) defaultHint();
   adjustExposure(level);
 }
 // try one picture with a given reader & binarizer
@@ -708,11 +753,13 @@ async function loop(){
   if(!running) return;
   frameN++;
   try{
-    if(native||zx){
+    if(target==='plate'){
+      if(plateW && !plateBusy && Date.now()-lastOcr>220) runPlateOcr();
+    } else if(native||zx){
       let v=await scanBarcode(); if(v) return found(v,'barcode',false,barSnap);
       v=await deepCheck(); if(v) return found(v,'barcode',false,barSnap);
     }
-    if(ocrPool.length && Date.now()-lastOcr>200) runOcr();
+    if(target!=='plate' && ocrPool.length && Date.now()-lastOcr>200) runOcr();
   }catch(e){}
   if(running) setTimeout(()=>requestAnimationFrame(loop), native?80:140);
 }
@@ -724,17 +771,18 @@ function found(v, how, unchecked, snap){
 }
 
 $('torchBtn').onclick=async()=>{ if(!track) return; torchOn=!torchOn; try{ await track.applyConstraints({advanced:[{torch:torchOn}]}); $('torchBtn').classList.toggle('on',torchOn); }catch(e){ toast('Light not available'); } };
-$('closeBtn').onclick=()=>{ stopCamera(); show(hist.length?'result':'start'); if(hist.length && !$('vin').value) { $('vin').value=hist[0]; evaluate(); } };
-$('startBtn').onclick=startCamera;
-$('againBtn').onclick=startCamera;
-function typeMode(){ stopCamera(); $('snapWrap').classList.add('hidden'); show('result'); $('vin').value=''; evaluate(); setTimeout(()=>$('vin').focus(),50); }
-$('typeBtn').onclick=typeMode; $('typeBtn0').onclick=typeMode;
-$('histBtn0').onclick=()=>{ show('result'); if(hist[0]){ $('vin').value=hist[0]; } evaluate(); };
+$('closeBtn').onclick=()=>{ stopCamera(); if(target==='plate'){ show('result'); return; } show(hist.length?'result':'start'); if(hist.length && !$('vin').value) { $('vin').value=hist[0]; evaluate(); } };
+$('startBtn').onclick=()=>{ target='vin'; newVehicle(); startCamera(); };
+$('againBtn').onclick=()=>{ target='vin'; if(clean(vinEl.value).length===17) newVehicle(); startCamera(); };
+function typeMode(){ if(target==='plate'){ stopCamera(); show('result'); setTimeout(()=>plateEl.focus(),50); return; } stopCamera(); $('snapWrap').classList.add('hidden'); show('result'); $('vin').value=''; evaluate(); setTimeout(()=>$('vin').focus(),50); }
+$('typeBtn').onclick=typeMode; $('typeBtn0').onclick=()=>{ target='vin'; typeMode(); };
+$('histBtn0').onclick=()=>{ show('result'); if(hist[0]){ $('vin').value=hist[0]; loadPlateFor(hist[0]); } evaluate(); };
 
 // still photo fallback
 $('photoBtn').onclick=()=>$('photo').click();
 $('photo').onchange=async e=>{
   const f=e.target.files[0]; e.target.value=''; if(!f) return;
+  if(target==='plate'){ stopCamera(); show('result'); return readPlatePhoto(f); }
   const img=new Image(); img.src=URL.createObjectURL(f); await img.decode().catch(()=>{});
   const s=Math.min(1,1800/Math.max(img.width,img.height)); cv.width=img.width*s; cv.height=img.height*s; ctx.drawImage(img,0,0,cv.width,cv.height);
   setHint('Checking photo…');
@@ -747,7 +795,8 @@ $('photo').onchange=async e=>{
 /* ================= result screen ================= */
 const vinEl=$('vin');
 function openResult(v, how, unchecked, snapUrl){
-  show('result'); vinEl.value=v; evaluate();
+  show('result'); vinEl.value=v; if(!clean(plateEl.value)) loadPlateFor(v); evaluate(); evaluatePlate();
+  if(!clean2(plateEl.value)) $('plateCard').classList.add('next');
   if(snapUrl){ $('snapImg').src=snapUrl; $('snapWrap').classList.remove('hidden'); } else $('snapWrap').classList.add('hidden');
   toast(how==='barcode'?'✓ Barcode scanned':'✓ VIN read'+(unchecked?', please verify':''));
   remember(v);
@@ -764,7 +813,7 @@ function evaluate(){
     ch.innerHTML=alts.length?'<span class="bad-t">✗ Check digit doesn\'t match. Tap the likely fix or compare with the car:</span>':'<span class="warn-t">⚠ Check digit doesn\'t match. Verify against the car. (Pre-1981 and some imports don\'t use one.)</span>';
     alts.forEach(a=>{ const b=document.createElement('button'); b.className='chip'; let h=''; for(let i=0;i<17;i++) h+=a[i]!==v[i]?'<span style="color:var(--accent)">'+a[i]+'</span>':a[i]; b.innerHTML=h; b.onclick=()=>{vinEl.value=a;evaluate();}; $('sugg').appendChild(b); });
   }
-  renderLinks(); decode(v); renderBarcode(v);
+  renderLinks(); decode(v); renderBarcode(v); renderCombo();
 }
 vinEl.addEventListener('input',evaluate);
 async function copyVin(quiet){ const v=clean(vinEl.value); if(!v) return toast('No VIN yet');
@@ -804,7 +853,15 @@ async function showBarcode(){
   try{ if('wakeLock' in navigator) wakeLock=await navigator.wakeLock.request('screen'); }catch(e){}
   remember(v);
 }
-function hideBarcode(){ $('bcFull').classList.add('hidden'); try{ wakeLock&&wakeLock.release(); }catch(e){} wakeLock=null; }
+async function showCombo(){
+  const t=comboStr(); if(!t) return toast('Need a 17-character VIN and a plate');
+  if(!valid(clean(vinEl.value))) toast('Check digit doesn\'t match. Double-check the VIN first');
+  $('bcBig').innerHTML=code39Svg(t,{height:60}); $('bcText').textContent=t; $('bcText').style.fontSize='4.4vw';
+  $('bcFull').classList.remove('hidden');
+  try{ if('wakeLock' in navigator) wakeLock=await navigator.wakeLock.request('screen'); }catch(e){}
+  savePlate(); remember(clean(vinEl.value));
+}
+function hideBarcode(){ $('bcText').style.fontSize=''; $('bcFull').classList.add('hidden'); try{ wakeLock&&wakeLock.release(); }catch(e){} wakeLock=null; }
 $('bcBtn').onclick=showBarcode; $('bcInline').onclick=showBarcode; $('bcFull').onclick=hideBarcode;
 
 /* ---- decode: NHTSA (online) with offline fallback ---- */
@@ -901,14 +958,145 @@ $('addBtn').onclick=()=>{ const n=$('newName').value.trim(); let u=$('newUrl').v
   if(!/^https?:\/\//i.test(u)) u='https://'+u; try{ new URL(u.replace(/\{VIN\}/g,'X')); }catch(e){ return toast('That URL looks wrong'); }
   custom.push({name:n,url:u}); store.set('vinsnap.custom',custom); $('newName').value=''; $('newUrl').value=''; renderLinks(); toast('Site added'); };
 
+/* ================= license plate ================= */
+// Plate reading: a separate text reader (letters I, O, Q allowed) watches the guide box; the tallest line of
+// text inside it is taken as the plate number, and it is accepted once two readings agree.
+let target='vin', plateW=null, plateP=null, plateBusy=false, plateReads=[], plateState='';
+const plateEl=$('plate'), stateEl=$('pstate');
+const clean2 = s => (s||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,10);
+let plateMap=store.get('vinsnap.plates',{});
+let combo=store.get('vinsnap.combo',{sep:'-',order:'vp'});
+$('cSep').value=combo.sep; $('cOrder').value=combo.order;
+['cSep','cOrder'].forEach(id=>$(id).onchange=()=>{ combo={sep:$('cSep').value,order:$('cOrder').value}; store.set('vinsnap.combo',combo); renderCombo(); });
+
+function ensurePlate(){
+  return plateP || (plateP=(async()=>{
+    await ensureDecoders();
+    if(!window.Tesseract) return null;
+    const w=await Tesseract.createWorker('eng',1,{});
+    await w.setParameters({tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', tessedit_pageseg_mode:'6', preserve_interword_spaces:'0'});
+    plateW=w; return w;
+  })().catch(()=>{ plateP=null; return null; }));
+}
+const STATES={NEWHAMPSHIRE:'NH',NEWJERSEY:'NJ',NEWMEXICO:'NM',NEWYORK:'NY',NORTHCAROLINA:'NC',NORTHDAKOTA:'ND',SOUTHCAROLINA:'SC',SOUTHDAKOTA:'SD',WESTVIRGINIA:'WV',RHODEISLAND:'RI',
+  MASSACHUSETTS:'MA',PENNSYLVANIA:'PA',CONNECTICUT:'CT',CALIFORNIA:'CA',MISSISSIPPI:'MS',TENNESSEE:'TN',WASHINGTON:'WA',LOUISIANA:'LA',MINNESOTA:'MN',WISCONSIN:'WI',OKLAHOMA:'OK',
+  ARKANSAS:'AR',COLORADO:'CO',DELAWARE:'DE',KENTUCKY:'KY',MARYLAND:'MD',MICHIGAN:'MI',MISSOURI:'MO',NEBRASKA:'NE',ILLINOIS:'IL',VIRGINIA:'VA',ALABAMA:'AL',ARIZONA:'AZ',FLORIDA:'FL',
+  GEORGIA:'GA',INDIANA:'IN',MONTANA:'MT',VERMONT:'VT',WYOMING:'WY',ALASKA:'AK',HAWAII:'HI',KANSAS:'KS',NEVADA:'NV',OREGON:'OR',IDAHO:'ID',MAINE:'ME',TEXAS:'TX',UTAH:'UT',IOWA:'IA',OHIO:'OH'};
+const NOT_PLATE=/^(DMV|DMVCAGOV|CAGOV|USA|DEALER|SAMPLE|STATE|THE)$/;
+function stateFrom(text){ const t=String(text||'').toUpperCase().replace(/[^A-Z]/g,''); for(const k of Object.keys(STATES)) if(t.includes(k)) return STATES[k]; return ''; }
+// pick the plate number: the tallest line of text in the box (state names and slogans are smaller)
+function plateFromData(data){
+  const lines=[];
+  if(data && data.blocks) for(const b of data.blocks) for(const p of (b.paragraphs||[])) for(const l of (p.lines||[])){
+    const ws=(l.words||[]).map(w=>({t:String(w.text||'').toUpperCase().replace(/[^A-Z0-9]/g,''), h:(w.bbox?w.bbox.y1-w.bbox.y0:0), c:+w.confidence||0})).filter(w=>w.t);
+    if(!ws.length) continue;
+    const mh=Math.max(...ws.map(w=>w.h)), big=ws.filter(w=>w.h>=mh*0.7);
+    lines.push({t:big.map(w=>w.t).join(''), h:mh, c:big.reduce((a,w)=>a+w.c,0)/big.length});
+  }
+  if(!lines.length) String((data&&data.text)||'').split(/\n/).forEach(x=>{ const t=x.toUpperCase().replace(/[^A-Z0-9]/g,''); if(t) lines.push({t,h:1,c:50}); });
+  const st=stateFrom(data&&data.text);
+  let best=null;
+  for(const L of lines){
+    const t=L.t; if(t.length<4||t.length>8||NOT_PLATE.test(t)||STATES[t]) continue;
+    if(Object.keys(STATES).some(k=>k.startsWith(t)&&t.length>=5)) continue;
+    const score=L.h*(/\d/.test(t)?1.25:1)*(/[A-Z]/.test(t)?1.1:1)*(0.5+L.c/200);
+    if(!best||score>best.s) best={p:t,s:score,c:L.c};
+  }
+  return best?{p:best.p, st, conf:best.c}:(st?{p:null,st}:null);
+}
+async function runPlateOcr(){
+  if(plateBusy||!plateW) return;
+  const src=grab(1.15,1400,document.createElement('canvas')); if(!src) return;
+  const sh=sharpness(src); sharpMax=Math.max(sharpMax*0.97, sh);
+  if(sh<sharpMax*0.55 && Date.now()-lastOcr<1500) return;
+  plateBusy=true; lastOcr=Date.now();
+  try{
+    const {data}=await plateW.recognize(prepOcr(src),{},{text:true,blocks:true});
+    if(!running||target!=='plate') return;
+    const r=plateFromData(data);
+    if(r && r.st) plateState=r.st;
+    if(r && r.p){
+      plateReads.push(r.p); if(plateReads.length>6) plateReads.shift();
+      setHint('Reading plate… hold steady', r.p+(plateState?'  ·  '+plateState:''));
+      if(plateReads.filter(x=>x===r.p).length>=2) return foundPlate(r.p, plateState);
+    }
+  }catch(e){} finally{ plateBusy=false; }
+}
+function foundPlate(p, st){
+  if(!running) return; running=false;
+  $('box').classList.add('hit'); beep();
+  setTimeout(()=>{ stopCamera(); show('result'); setPlate(p, st); toast('✓ Plate '+p+', please verify'); }, 250);
+}
+function setPlate(p, st){
+  plateEl.value=p; if(st) stateEl.value=st; else if(!stateEl.value) stateEl.value=store.get('vinsnap.lastState','');
+  evaluatePlate(); savePlate();
+  setTimeout(()=>$('plateCard').scrollIntoView({behavior:'smooth',block:'start'}),60);
+}
+async function scanPlate(){
+  stopCamera(); target='plate'; plateState=''; plateReads=[];
+  ensurePlate();
+  await startCamera();
+}
+async function readPlatePhoto(f){
+  $('pcheck').innerHTML='<span class="spin"></span>Reading plate…';
+  const w=await ensurePlate(); if(!w){ $('pcheck').innerHTML='<span class="warn-t">Plate reader needs an internet connection the first time.</span>'; return; }
+  const img=new Image(); img.src=URL.createObjectURL(f); await img.decode().catch(()=>{});
+  const s=Math.min(1,1800/Math.max(img.width,img.height)); cv.width=img.width*s; cv.height=img.height*s; ctx.drawImage(img,0,0,cv.width,cv.height);
+  let r=null;
+  try{
+    await w.setParameters({tessedit_pageseg_mode:'11'});          // a full photo: look for text anywhere
+    const {data}=await w.recognize(prepOcr(cv),{},{text:true,blocks:true}); r=plateFromData(data);
+  }catch(e){} finally{ try{ await w.setParameters({tessedit_pageseg_mode:'6'}); }catch(e){} }
+  if(r && r.p){ beep(); setPlate(r.p, r.st); toast('✓ Plate '+r.p+', please verify'); }
+  else $('pcheck').innerHTML='<span class="warn-t">No plate found. Get closer so the plate fills most of the photo, or type it.</span>';
+}
+function comboStr(){
+  const v=clean(vinEl.value), p=clean2(plateEl.value);
+  if(v.length!==17 || p.length<2) return '';
+  return combo.order==='pv' ? p+combo.sep+v : v+combo.sep+p;
+}
+function renderCombo(){
+  const t=comboStr(); $('comboWrap').classList.toggle('hidden',!t); if(!t) return;
+  try{ $('comboInline').innerHTML=code39Svg(t,{height:60}); $('comboText').textContent=t; }catch(e){ $('comboWrap').classList.add('hidden'); }
+}
+function evaluatePlate(){
+  const p=clean2(plateEl.value); if(plateEl.value!==p) plateEl.value=p;
+  const st=(stateEl.value||'').toUpperCase().replace(/[^A-Z]/g,'').slice(0,2); if(stateEl.value!==st) stateEl.value=st;
+  plateEl.className = p.length>=2 ? 'good' : '';
+  $('pcheck').innerHTML = !p ? '<span class="muted">Scan the plate after the VIN, or type it.</span>'
+    : p.length<2 ? '' : '<span class="good-t">✓ '+p+(st?' · '+st:'')+'</span> <span class="muted">· double-check 0/O, 8/B, 1/I</span>';
+  if(p) $('plateCard').classList.remove('next');
+  renderCombo();
+}
+function savePlate(){
+  const v=clean(vinEl.value), p=clean2(plateEl.value), st=(stateEl.value||'').toUpperCase();
+  if(st) store.set('vinsnap.lastState',st);
+  if(v.length!==17 || !p) return;
+  plateMap[v]={plate:p,state:st}; const ks=Object.keys(plateMap); if(ks.length>200) delete plateMap[ks[0]];
+  store.set('vinsnap.plates',plateMap); renderHist();
+}
+function loadPlateFor(v){ const m=plateMap[v]; plateEl.value=m?m.plate:''; stateEl.value=m?(m.state||''):(store.get('vinsnap.lastState','')||''); }
+function newVehicle(){ plateEl.value=''; stateEl.value=store.get('vinsnap.lastState','')||''; plateReads=[]; }
+plateEl.addEventListener('input',evaluatePlate); stateEl.addEventListener('input',evaluatePlate);
+plateEl.addEventListener('change',savePlate); stateEl.addEventListener('change',savePlate);
+$('plateScanBtn').onclick=scanPlate;
+$('platePhotoBtn').onclick=()=>$('platePhoto').click();
+$('platePhoto').onchange=e=>{ const f=e.target.files[0]; e.target.value=''; if(f) readPlatePhoto(f); };
+$('comboBtn').onclick=showCombo; $('comboInline').onclick=showCombo;
+$('copyComboBtn').onclick=async()=>{ const t=comboStr(); if(!t) return; savePlate(); remember(clean(vinEl.value)); try{ await navigator.clipboard.writeText(t); toast('Copied '+t); }catch(e){ toast('Copy blocked'); } };
+function defaultHint(){
+  if(target==='plate') setHint('Fit the license plate inside the box','Straight on, about 3–6 ft away. Avoid glare on the plate');
+  else setHint('Fit the VIN inside the box','Barcode on the door jamb, or the VIN plate through the windshield');
+}
+
 /* ---- history ---- */
 let hist=store.get('vinsnap.hist',[]);
 function remember(v){ if(!v||v.length!==17) return; hist=[v,...hist.filter(h=>h!==v)].slice(0,12); store.set('vinsnap.hist',hist); renderHist(); }
 function renderHist(){ $('histCard').classList.toggle('hidden',!hist.length); $('histBtn0').classList.toggle('hidden',!hist.length); const box=$('hist'); box.innerHTML='';
   hist.forEach(v=>{ const b=document.createElement('button'); const r=decCache[v]; const label=r?[r.ModelYear,r.Make&&r.Make.replace(/\b\w+/g,w=>w[0]+w.slice(1).toLowerCase()),r.Model].filter(Boolean).join(' '):[modelYear(v),makeOf(v).replace(/ \(.*\)$/,'')].filter(Boolean).join(' ');
-    b.textContent=v+(label?'  ·  '+label:''); b.onclick=()=>{vinEl.value=v;evaluate();window.scrollTo({top:0,behavior:'smooth'});}; box.appendChild(b); }); }
+    const pm=plateMap[v]; b.textContent=v+(pm&&pm.plate?'  ·  '+pm.plate+(pm.state?' '+pm.state:''):'')+(label?'  ·  '+label:''); b.onclick=()=>{vinEl.value=v;loadPlateFor(v);evaluate();evaluatePlate();window.scrollTo({top:0,behavior:'smooth'});}; box.appendChild(b); }); }
 
-renderHist();
+renderHist(); evaluatePlate();
 // warm up decoders in the background so the first scan is fast
 ensureDecoders();
 })();
