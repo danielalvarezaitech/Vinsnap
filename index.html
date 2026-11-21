@@ -179,6 +179,7 @@
       <input id="pstate" maxlength="2" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ST" aria-label="State">
     </div>
     <div id="pcheck"></div>
+    <div class="sugg" id="psugg"></div>
     <div class="row"><button class="btn primary" id="plateScanBtn" type="button">🎯 Scan plate</button><button class="btn" id="platePhotoBtn" type="button" style="flex:0 0 auto;padding:13px 16px">📷 Photo</button></div>
     <input id="platePhoto" type="file" accept="image/*" capture="environment" hidden>
     <div id="comboWrap" class="hidden">
@@ -1016,6 +1017,7 @@ async function runPlateOcr(){
     const r=plateFromData(data);
     if(r && r.st) plateState=r.st;
     if(r && r.p){
+      r.p=fixPlate(r.p, plateState||stateEl.value||store.get('vinsnap.lastState','')||'CA');
       plateReads.push(r.p); if(plateReads.length>6) plateReads.shift();
       setHint('Reading plate… hold steady', r.p+(plateState?'  ·  '+plateState:''));
       if(plateReads.filter(x=>x===r.p).length>=2) return foundPlate(r.p, plateState);
@@ -1047,7 +1049,7 @@ async function readPlatePhoto(f){
     await w.setParameters({tessedit_pageseg_mode:'11'});          // a full photo: look for text anywhere
     const {data}=await w.recognize(prepOcr(cv),{},{text:true,blocks:true}); r=plateFromData(data);
   }catch(e){} finally{ try{ await w.setParameters({tessedit_pageseg_mode:'6'}); }catch(e){} }
-  if(r && r.p){ beep(); setPlate(r.p, r.st); toast('✓ Plate '+r.p+', please verify'); }
+  if(r && r.p){ r.p=fixPlate(r.p, r.st||stateEl.value||store.get('vinsnap.lastState','')||'CA'); beep(); setPlate(r.p, r.st); toast('✓ Plate '+r.p+', please verify'); }
   else $('pcheck').innerHTML='<span class="warn-t">No plate found. Get closer so the plate fills most of the photo, or type it.</span>';
 }
 function comboStr(){
@@ -1059,6 +1061,52 @@ function renderCombo(){
   const t=comboStr(); $('comboWrap').classList.toggle('hidden',!t); if(!t) return;
   try{ $('comboInline').innerHTML=code39Svg(t,{height:60}); $('comboText').textContent=t; }catch(e){ $('comboWrap').classList.add('hidden'); }
 }
+/* ---- 7 ↔ T (and other look-alike) correction ----
+   Plate fonts make 7 and T look almost the same. Each state issues plates in fixed layouts
+   (California: 1 digit, 3 letters, 3 digits, e.g. 8ABC123). When a reading almost fits a layout and the
+   only differences are look-alike characters, swap them so it fits. With no known layout, a T between
+   two digits becomes 7 and a 7 between two letters becomes T. */
+const PL_SWAP={T:'7','7':'T',I:'1','1':'I',O:'0','0':'O',Q:'0',B:'8','8':'B',S:'5','5':'S',Z:'2','2':'Z',G:'6','6':'G'};
+const PL_PATTERNS={
+  CA:['DLLLDDD','DLDDDDD'],          // passenger 8ABC123 · commercial 8A12345
+  TX:['LLLDDDD'], NY:['LLLDDDD'], AZ:['LLLDDDD'], WA:['LLLDDDD'], PA:['LLLDDDD']
+};
+const kind=c=>/\d/.test(c)?'D':'L';
+function fixPlate(p, st){
+  if(!p) return p;
+  let best=null;
+  for(const pat of (PL_PATTERNS[st]||[])){
+    if(pat.length!==p.length) continue;
+    let out='', n=0, ok=true;
+    for(let i=0;i<p.length;i++){
+      const c=p[i]; if(kind(c)===pat[i]){ out+=c; continue; }
+      const sw=PL_SWAP[c]; if(sw && kind(sw)===pat[i]){ out+=sw; n++; } else { ok=false; break; }
+    }
+    if(ok && (!best || n<best.n)) best={out,n};
+  }
+  if(best) return best.out;
+  const a=[...p];
+  for(let i=1;i<a.length-1;i++){
+    if(a[i]!=='T' && a[i]!=='7') continue;
+    const L=kind(a[i-1]), R=kind(a[i+1]);
+    if(L==='D' && R==='D') a[i]='7'; else if(L==='L' && R==='L' && a[i-1]!=='T' && a[i+1]!=='T') a[i]='T';
+  }
+  return a.join('');
+}
+// one-tap alternatives for every 7/T in the plate
+function plateAlts(p){
+  const pos=[]; for(let i=0;i<p.length;i++) if(p[i]==='7'||p[i]==='T') pos.push(i);
+  const out=[]; pos.forEach(i=>out.push(p.slice(0,i)+(p[i]==='7'?'T':'7')+p.slice(i+1)));
+  if(pos.length>1) out.push(p.replace(/[7T]/g,c=>c==='7'?'T':'7'));
+  return [...new Set(out)].slice(0,4);
+}
+function renderPlateAlts(p){
+  const box=$('psugg'); box.innerHTML='';
+  if(!p || !/[7T]/.test(p)) return;
+  const lab=document.createElement('span'); lab.className='note'; lab.style.cssText='width:100%;margin-top:2px'; lab.textContent='7 or T? Tap the right one if it\'s wrong:'; box.appendChild(lab);
+  plateAlts(p).forEach(a=>{ const b=document.createElement('button'); b.type='button'; b.className='chip'; let h=''; for(let i=0;i<a.length;i++) h+=a[i]!==p[i]?'<span style="color:var(--accent)">'+a[i]+'</span>':a[i]; b.innerHTML=h;
+    b.onclick=()=>{ plateEl.value=a; evaluatePlate(); savePlate(); toast('Plate changed to '+a); }; box.appendChild(b); });
+}
 function evaluatePlate(){
   const p=clean2(plateEl.value); if(plateEl.value!==p) plateEl.value=p;
   const st=(stateEl.value||'').toUpperCase().replace(/[^A-Z]/g,'').slice(0,2); if(stateEl.value!==st) stateEl.value=st;
@@ -1066,6 +1114,7 @@ function evaluatePlate(){
   $('pcheck').innerHTML = !p ? '<span class="muted">Scan the plate after the VIN, or type it.</span>'
     : p.length<2 ? '' : '<span class="good-t">✓ '+p+(st?' · '+st:'')+'</span> <span class="muted">· double-check 0/O, 8/B, 1/I</span>';
   if(p) $('plateCard').classList.remove('next');
+  renderPlateAlts(p.length>=2?p:'');
   renderCombo();
 }
 function savePlate(){
