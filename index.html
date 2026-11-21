@@ -106,9 +106,12 @@
   #scanner.plate #modes{top:calc(30% - 46px)}
   #scanner.plate #laser{display:none}
   #bcFull{position:fixed;inset:0;background:#fff;z-index:200;overflow:hidden;cursor:pointer}
-  #bcFull .rot{position:absolute;top:50%;left:50%;width:100vh;height:100vw;transform:translate(-50%,-50%) rotate(90deg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px}
-  #bcBig{width:94%}
-  #bcBig svg{display:block;width:100%;height:46vw}
+  /* rotated to landscape; sized to the VISIBLE screen (dvh excludes browser bars) and kept clear of the notch,
+     rounded corners and home bar so the whole barcode, including its white margins, always fits */
+  #bcFull .rot{position:absolute;top:50%;left:50%;width:100vh;width:100dvh;height:100vw;transform:translate(-50%,-50%) rotate(90deg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
+    padding:calc(env(safe-area-inset-left,0px) + 3vw) calc(env(safe-area-inset-bottom,0px) + 9vw) calc(env(safe-area-inset-right,0px) + 3vw) calc(env(safe-area-inset-top,0px) + 9vw);box-sizing:border-box}
+  #bcBig{width:100%;max-width:100%}
+  #bcBig svg{display:block;width:100%;height:40vw}
   #bcText{font:800 7vw/1 ui-monospace,Menlo,monospace;letter-spacing:.35vw;color:#000}
   #bcTip,.bcTip{font-size:3.4vw;color:#555;text-align:center;padding:0 4vw}
   #toast{position:fixed;left:50%;bottom:calc(var(--sb) + 24px);transform:translateX(-50%) translateY(120px);background:#fff;color:#000;font-weight:800;border-radius:999px;padding:11px 18px;transition:transform .25s;z-index:99;white-space:nowrap}
