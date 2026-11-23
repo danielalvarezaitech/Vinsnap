@@ -195,7 +195,7 @@
       <summary>Barcode format</summary>
       <div class="opts">
         <label>Separator<select id="cSep"><option value="-">Hyphen  ( - )</option><option value=".">Period  ( . )</option><option value=" ">Space</option><option value="">None</option></select></label>
-        <label>Order<select id="cOrder"><option value="vp">VIN, then plate</option><option value="pv">Plate, then VIN</option></select></label>
+        <label>Order<select id="cOrder"><option value="pct">%VIN A PLATE (scanner app)</option><option value="vp">VIN, then plate</option><option value="pv">Plate, then VIN</option></select></label>
       </div>
       <p class="note">The VIN is always 17 characters, so your system can split the scan at character 17 even with no separator. Plates are stored without spaces.</p>
     </details>
@@ -828,7 +828,8 @@ $('copyBtn').onclick=()=>{ copyVin(false); remember(clean(vinEl.value)); };
 const C39={'0':'000110100','1':'100100001','2':'001100001','3':'101100000','4':'000110001','5':'100110000','6':'001110000','7':'000100101','8':'100100100','9':'001100100',
 'A':'100001001','B':'001001001','C':'101001000','D':'000011001','E':'100011000','F':'001011000','G':'000001101','H':'100001100','I':'001001100','J':'000011100',
 'K':'100000011','L':'001000011','M':'101000010','N':'000010011','O':'100010010','P':'001010010','Q':'000000111','R':'100000110','S':'001000110','T':'000010110',
-'U':'110000001','V':'011000001','W':'111000000','X':'010010001','Y':'110010000','Z':'011010000','-':'010000101','.':'110000100',' ':'011000100','*':'010010100'};
+'U':'110000001','V':'011000001','W':'111000000','X':'010010001','Y':'110010000','Z':'011010000','-':'010000101','.':'110000100',' ':'011000100','*':'010010100',
+'$':'010101000','/':'010100010','+':'010001010','%':'000101010'};
 function code39Svg(text, opts){
   opts=opts||{}; const N=1, Wd=3, h=opts.height||60, q=10; let x=q; const rects=[];
   const s='*'+text.toUpperCase()+'*';
@@ -969,9 +970,11 @@ let target='vin', plateW=null, plateP=null, plateBusy=false, plateReads=[], plat
 const plateEl=$('plate'), stateEl=$('pstate');
 const clean2 = s => (s||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,10);
 let plateMap=store.get('vinsnap.plates',{});
-let combo=store.get('vinsnap.combo',{sep:'-',order:'vp'});
+let combo=store.get('vinsnap.combo2',{sep:'-',order:'pct'});
 $('cSep').value=combo.sep; $('cOrder').value=combo.order;
-['cSep','cOrder'].forEach(id=>$(id).onchange=()=>{ combo={sep:$('cSep').value,order:$('cOrder').value}; store.set('vinsnap.combo',combo); renderCombo(); });
+const syncSep=()=>{ $('cSep').disabled = combo.order==='pct'; };
+['cSep','cOrder'].forEach(id=>$(id).onchange=()=>{ combo={sep:$('cSep').value,order:$('cOrder').value}; store.set('vinsnap.combo2',combo); syncSep(); renderCombo(); });
+syncSep();
 
 function ensurePlate(){
   return plateP || (plateP=(async()=>{
@@ -1058,6 +1061,7 @@ async function readPlatePhoto(f){
 function comboStr(){
   const v=clean(vinEl.value), p=clean2(plateEl.value);
   if(v.length!==17 || p.length<2) return '';
+  if(combo.order==='pct') return '%'+v+'A'+p;      // scanner-app format: %VIN A PLATE
   return combo.order==='pv' ? p+combo.sep+v : v+combo.sep+p;
 }
 function renderCombo(){
